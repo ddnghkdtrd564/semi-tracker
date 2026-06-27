@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Portfolio Tracker</title>
+<link rel="stylesheet" href="/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+</head>
+<body>
+
+<div class="topnav">
+  <div class="topnav-inner">
+    <div class="tab-group">
+      <button class="tab-btn active" data-tab="SEMI">SEMI</button>
+      <button class="tab-btn" data-tab="IUSA">IUSA</button>
+      <button class="tab-btn" data-tab="DIV">UK Dividend Pie 🥧</button>
+    </div>
+    <button class="theme-toggle" id="themeToggle" title="Toggle light/dark">🌙</button>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="panel active" id="panel-SEMI" data-fund="SEMI"></div>
+  <div class="panel" id="panel-IUSA" data-fund="IUSA"></div>
+  <div class="panel" id="panel-DIV"></div>
+</div>
+
+<script src="/app.js"></script>
+<script src="/pie.js"></script>
+<script>
+  document.querySelectorAll('.tab-btn').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+      document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+      btn.classList.add('active');
+      const tab = btn.dataset.tab;
+      document.getElementById('panel-' + tab).classList.add('active');
+      if (tab === 'DIV') loadPie();
+      else activateFundTab(tab);
+    });
+  });
+
+  const themeToggle = document.getElementById('themeToggle');
+  function applyTheme(t){
+    document.body.setAttribute('data-theme', t);
+    themeToggle.textContent = t === 'light' ? '☀️' : '🌙';
+    try{ localStorage.setItem('theme', t); }catch(e){}
+  }
+  let savedTheme = 'dark';
+  try{ savedTheme = localStorage.getItem('theme') || 'dark'; }catch(e){}
+  applyTheme(savedTheme);
+  themeToggle.addEventListener('click', ()=>{
+    applyTheme(document.body.getAttribute('data-theme') === 'light' ? 'dark' : 'light');
+  });
+
+  initFundTabs();
+</script>
+</body>
+</html>
