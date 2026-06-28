@@ -98,27 +98,64 @@ app.get('/api/snapshot/:fund', async (req, res) => {
 // US names (INTC, KLAC) get LIVE analyst target + EPS surprise too.
 // ============================================================
 
-async function fetchYahooBatch(symbols) {
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbols.join(','))}`;
-  const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PortfolioTracker/1.0)' } });
-  if (!r.ok) throw new Error(`Yahoo HTTP ${r.status}`);
-  const json = await r.json();
+// Yahoo's v7/finance/quote BATCH endpoint increasingly requires an auth "crumb"
+// and often 401s when called without a browser session — this was the likely
+// reason LSE prices were coming back empty. The v8/finance/chart endpoint
+// (the same one the Python "yfinance" library uses under the hood) has a much
+// better track record working unauthenticated. We call it once per symbol —
+// still cheap, just parallel HTTP calls — and treat v7 as a bonus-only,
+// best-effort source for extra stats (market cap / P/E) that never blocks
+// the critical price data if it fails.
+async function fetchYahooChart(symbol) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=5d`;
+  const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' } });
+  const body = await r.text();
+  if (!r.ok) throw new Error(`HTTP ${r.status}: ${body.slice(0, 120)}`);
+  const json = JSON.parse(body);
+  const meta = json?.chart?.result?.[0]?.meta;
+  if (!meta || typeof meta.regularMarketPrice !== 'number') throw new Error('no price in response');
+  const price = meta.regularMarketPrice;
+  const prevClose = meta.previousClose ?? meta.chartPreviousClose;
+  const move = (typeof prevClose === 'number' && prevClose !== 0) ? ((price - prevClose) / prevClose) * 100 : null;
+  return {
+    price, move, currency: meta.currency || null,
+    fiftyTwoWeekLow: meta.fiftyTwoWeekLow ?? null, fiftyTwoWeekHigh: meta.fiftyTwoWeekHigh ?? null,
+    volume: meta.regularMarketVolume ?? null,
+  };
+}
+
+async function fetchYahooChartBatch(symbols, diag) {
   const map = {};
-  (json?.quoteResponse?.result || []).forEach((q) => { map[q.symbol] = q; });
+  await Promise.all(symbols.map(async (s) => {
+    try { map[s] = await fetchYahooChart(s); }
+    catch (e) { diag.push({ ticker: s, source: 'yahoo-chart', error: e.message }); }
+  }));
   return map;
 }
 
-// Stooq — free, no API key, explicitly covers LSE ("xxxx.uk" tickers). Used as a
-// third-layer fallback for price only (it doesn't reliably give a clean % move
-// in this lightweight CSV format, so we leave move=null when this is the source
-// rather than guess). NOTE: unverified against a live call from this build
-// environment (no outbound network here) — first thing to check if LSE prices
-// ever come back empty after deploy.
-async function fetchStooqBatch(stooqSymbols) {
+// Best-effort only — bonus market cap / P/E. Failing here never blocks price data.
+async function fetchYahooQuoteStatsBatch(symbols, diag) {
+  try {
+    const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbols.join(','))}`;
+    const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' } });
+    const body = await r.text();
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${body.slice(0, 120)}`);
+    const json = JSON.parse(body);
+    const map = {};
+    (json?.quoteResponse?.result || []).forEach((q) => { map[q.symbol] = q; });
+    return map;
+  } catch (e) {
+    diag.push({ ticker: 'ALL', source: 'yahoo-quote-stats(bonus)', error: e.message });
+    return {};
+  }
+}
+
+// Stooq — free, no API key, explicitly covers LSE ("xxxx.uk" tickers).
+async function fetchStooqBatch(stooqSymbols, diag) {
   const url = `https://stooq.com/q/l/?s=${encodeURIComponent(stooqSymbols.join(','))}&f=sd2t2ohlcv&h&e=csv`;
-  const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PortfolioTracker/1.0)' } });
-  if (!r.ok) throw new Error(`Stooq HTTP ${r.status}`);
+  const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' } });
   const text = await r.text();
+  if (!r.ok) throw new Error(`Stooq HTTP ${r.status}: ${text.slice(0, 120)}`);
   const lines = text.trim().split('\n');
   const map = {};
   lines.slice(1).forEach((line) => {
@@ -126,6 +163,7 @@ async function fetchStooqBatch(stooqSymbols) {
     const sym = (cols[0] || '').toLowerCase();
     const close = parseFloat(cols[6]);
     if (sym && !isNaN(close) && close > 0) map[sym] = { close };
+    else diag.push({ ticker: sym || '(unknown)', source: 'stooq', error: `unparseable row: ${line}` });
   });
   return map;
 }
@@ -161,47 +199,49 @@ async function fetchFinnhubEarnings(symbol) {
 }
 
 let pieCache = { data: null, ts: 0 };
-const PIE_CACHE_MS = 30 * 1000; // refreshed faster than fund tabs — Yahoo/Stooq batch calls are cheap (1 HTTP call covers all 26 tickers)
+const PIE_CACHE_MS = 30 * 1000;
 
 async function buildPie() {
+  const diag = []; // collects every failed attempt with a reason — never silently swallowed
   const lseTickers = ukDividendPie.filter((h) => h.exch === 'LSE').map((h) => h.t);
   const usTickers = ukDividendPie.filter((h) => h.exch === 'US').map((h) => h.t);
 
-  // ---- LSE chain: Yahoo (primary) -> Stooq (free, no-key, explicit LSE coverage) -> Finnhub (tertiary) ----
-  let yahooLse = {};
-  try { yahooLse = await fetchYahooBatch(lseTickers); } catch (e) { /* fall through to Stooq/Finnhub */ }
+  // ---- LSE chain: Yahoo chart (primary, per-symbol, no-auth-friendly) -> Stooq -> Finnhub (tertiary) ----
+  const yahooLse = await fetchYahooChartBatch(lseTickers, diag);
 
-  const stillNeedLse = lseTickers.filter((t) => !(yahooLse[t] && typeof yahooLse[t].regularMarketPrice === 'number'));
+  const stillNeedLse = lseTickers.filter((t) => !yahooLse[t]);
   let stooqMap = {};
   if (stillNeedLse.length > 0) {
-    try {
-      const stooqSymbols = stillNeedLse.map(toStooqSymbol);
-      stooqMap = await fetchStooqBatch(stooqSymbols);
-    } catch (e) { /* fall through to Finnhub */ }
+    try { stooqMap = await fetchStooqBatch(stillNeedLse.map(toStooqSymbol), diag); }
+    catch (e) { diag.push({ ticker: 'ALL-LSE', source: 'stooq', error: e.message }); }
   }
 
   const stillNeedLse2 = stillNeedLse.filter((t) => !stooqMap[toStooqSymbol(t)]);
-  let finnhubLse = {};
+  const finnhubLse = {};
   if (stillNeedLse2.length > 0) {
-    const results = await Promise.all(stillNeedLse2.map(async (t) => {
-      try { return { t, q: await fetchFinnhubQuote(t) }; } catch (e) { return { t, q: null }; }
+    await Promise.all(stillNeedLse2.map(async (t) => {
+      try {
+        const q = await fetchFinnhubQuote(t);
+        if (typeof q.c === 'number' && q.c !== 0) finnhubLse[t] = q;
+        else diag.push({ ticker: t, source: 'finnhub', error: `empty quote (c=${q.c})` });
+      } catch (e) { diag.push({ ticker: t, source: 'finnhub', error: e.message }); }
     }));
-    results.forEach(({ t, q }) => { finnhubLse[t] = q; });
   }
 
-  // ---- US chain: Finnhub (primary, well-documented free coverage) -> Yahoo (fallback) ----
-  const finnhubUsResults = await Promise.all(usTickers.map(async (t) => {
-    try { return { t, q: await fetchFinnhubQuote(t) }; } catch (e) { return { t, q: null }; }
-  }));
+  // ---- US chain: Finnhub (primary) -> Yahoo chart (fallback) ----
   const finnhubUs = {};
-  finnhubUsResults.forEach(({ t, q }) => { finnhubUs[t] = q; });
-  const weakUs = usTickers.filter((t) => !(finnhubUs[t] && typeof finnhubUs[t].c === 'number' && finnhubUs[t].c !== 0));
-  let yahooUs = {};
-  if (weakUs.length > 0) { try { yahooUs = await fetchYahooBatch(weakUs); } catch (e) { /* none left */ } }
+  await Promise.all(usTickers.map(async (t) => {
+    try {
+      const q = await fetchFinnhubQuote(t);
+      if (typeof q.c === 'number' && q.c !== 0) finnhubUs[t] = q;
+      else diag.push({ ticker: t, source: 'finnhub', error: `empty quote (c=${q.c})` });
+    } catch (e) { diag.push({ ticker: t, source: 'finnhub', error: e.message }); }
+  }));
+  const weakUs = usTickers.filter((t) => !finnhubUs[t]);
+  const yahooUs = weakUs.length > 0 ? await fetchYahooChartBatch(weakUs, diag) : {};
 
-  // ---- Stats (market cap / P/E / 52wk / volume): Yahoo for everyone, broadest free coverage ----
-  let yahooStatsMap = {};
-  try { yahooStatsMap = await fetchYahooBatch(ukDividendPie.map((h) => h.t)); } catch (e) { /* informative message shown per-row */ }
+  // ---- Bonus stats only (market cap / P/E) — best-effort, never blocks price data ----
+  const yahooStatsMap = await fetchYahooQuoteStatsBatch(ukDividendPie.map((h) => h.t), diag);
 
   // ---- Live analyst target + EPS surprise for the two US-listed names ----
   const liveExtras = {};
@@ -211,32 +251,35 @@ async function buildPie() {
         const [pt, earn] = await Promise.all([fetchFinnhubPriceTarget(h.t), fetchFinnhubEarnings(h.t)]);
         liveExtras[h.t] = { priceTarget: pt, earnings: (earn || []).slice(0, 4) };
       } catch (e) {
-        liveExtras[h.t] = { priceTarget: null, earnings: null, error: e.message };
+        liveExtras[h.t] = { priceTarget: null, earnings: null };
+        diag.push({ ticker: h.t, source: 'finnhub-analyst/eps', error: e.message });
       }
     }
   }
 
   const holdings = ukDividendPie.map((h) => {
-    let price = null, move = null, priceSource = null, stale = false;
+    let price = null, move = null, priceSource = null, stale = false, liveCurrency = null, fiftyTwoWeekLow = null, fiftyTwoWeekHigh = null, volume = null;
 
     if (h.exch === 'LSE') {
-      const yq = yahooLse[h.t];
+      const yc = yahooLse[h.t];
       const sq = stooqMap[toStooqSymbol(h.t)];
       const fq = finnhubLse[h.t];
-      if (yq && typeof yq.regularMarketPrice === 'number') {
-        price = yq.regularMarketPrice; move = typeof yq.regularMarketChangePercent === 'number' ? yq.regularMarketChangePercent : null; priceSource = 'yahoo';
+      if (yc) {
+        price = yc.price; move = yc.move; priceSource = 'yahoo';
+        liveCurrency = yc.currency; fiftyTwoWeekLow = yc.fiftyTwoWeekLow; fiftyTwoWeekHigh = yc.fiftyTwoWeekHigh; volume = yc.volume;
       } else if (sq) {
         price = sq.close; move = null; priceSource = 'stooq';
-      } else if (fq && typeof fq.c === 'number' && fq.c !== 0) {
+      } else if (fq) {
         price = fq.c; move = typeof fq.dp === 'number' ? fq.dp : null; priceSource = 'finnhub';
       }
     } else {
       const fq = finnhubUs[h.t];
-      const yq = yahooUs[h.t];
-      if (fq && typeof fq.c === 'number' && fq.c !== 0) {
+      const yc = yahooUs[h.t];
+      if (fq) {
         price = fq.c; move = typeof fq.dp === 'number' ? fq.dp : null; priceSource = 'finnhub';
-      } else if (yq && typeof yq.regularMarketPrice === 'number') {
-        price = yq.regularMarketPrice; move = typeof yq.regularMarketChangePercent === 'number' ? yq.regularMarketChangePercent : null; priceSource = 'yahoo';
+      } else if (yc) {
+        price = yc.price; move = yc.move; priceSource = 'yahoo';
+        liveCurrency = yc.currency; fiftyTwoWeekLow = yc.fiftyTwoWeekLow; fiftyTwoWeekHigh = yc.fiftyTwoWeekHigh; volume = yc.volume;
       }
     }
 
@@ -249,11 +292,19 @@ async function buildPie() {
     }
 
     const ys = yahooStatsMap[h.t];
-    const stats = ys ? {
-      marketCap: ys.marketCap ?? null, peRatio: ys.trailingPE ?? null,
-      fiftyTwoWeekLow: ys.fiftyTwoWeekLow ?? null, fiftyTwoWeekHigh: ys.fiftyTwoWeekHigh ?? null,
-      volume: ys.regularMarketVolume ?? null, currency: ys.currency ?? null,
-    } : null;
+    // Currency: prefer whatever a live source actually reported this cycle; otherwise
+    // fall back to the curated default (data file) — so the unit is NEVER unknown,
+    // even on a cycle where every live source failed.
+    const currency = liveCurrency || ys?.currency || h.defaultCurrency || null;
+
+    const stats = {
+      marketCap: ys?.marketCap ?? null,
+      peRatio: ys?.trailingPE ?? null,
+      fiftyTwoWeekLow: fiftyTwoWeekLow ?? ys?.fiftyTwoWeekLow ?? null,
+      fiftyTwoWeekHigh: fiftyTwoWeekHigh ?? ys?.fiftyTwoWeekHigh ?? null,
+      volume: volume ?? ys?.regularMarketVolume ?? null,
+      currency,
+    };
 
     const extra = liveExtras[h.t];
     return {
@@ -263,16 +314,26 @@ async function buildPie() {
     };
   });
 
-  return { holdings, fetchedAt: new Date().toISOString() };
+  // Always log a summary server-side (visible in Render's Logs tab) so failures
+  // are diagnosable without needing to add anything extra.
+  const blanks = holdings.filter((h) => h.price === null).map((h) => h.t);
+  console.log(`[pie] refresh: ${holdings.length - blanks.length}/${holdings.length} priced. Sources: yahoo=${Object.keys(yahooLse).length+Object.keys(yahooUs).length}, stooq=${Object.keys(stooqMap).length}, finnhub=${Object.keys(finnhubLse).length+Object.keys(finnhubUs).length}.${blanks.length ? ' STILL BLANK: ' + blanks.join(',') : ''}`);
+  if (diag.length) console.log('[pie] diagnostics:', JSON.stringify(diag));
+
+  return { holdings, fetchedAt: new Date().toISOString(), diag };
 }
 
 app.get('/api/pie', async (req, res) => {
   try {
     if (!API_KEY) return res.status(500).json({ error: 'FINNHUB_API_KEY is not set. Add it under Render > Environment.' });
-    if (pieCache.data && Date.now() - pieCache.ts < PIE_CACHE_MS) return res.json(pieCache.data);
+    if (pieCache.data && Date.now() - pieCache.ts < PIE_CACHE_MS) {
+      const out = req.query.debug ? pieCache.data : { holdings: pieCache.data.holdings, fetchedAt: pieCache.data.fetchedAt };
+      return res.json(out);
+    }
     const data = await buildPie();
     pieCache = { data, ts: Date.now() };
-    res.json(data);
+    const out = req.query.debug ? data : { holdings: data.holdings, fetchedAt: data.fetchedAt };
+    res.json(out);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
