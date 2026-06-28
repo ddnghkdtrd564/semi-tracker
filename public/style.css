@@ -102,9 +102,10 @@ tbody tr.other-row td{color:var(--faint); font-style:italic;}
 .detail-row.open{display:table-row;}
 .detail-cell{padding:0 !important; border-bottom:1px solid var(--line) !important;}
 .detail-inner{padding:20px; background:var(--surface-2);}
-.detail-grid{display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-bottom:18px;}
+.detail-grid{display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-bottom:18px; min-width:0;}
 @media (max-width:700px){.detail-grid{grid-template-columns:1fr;}}
-.detail-card{background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:14px 16px; max-height:300px; overflow-y:auto; -webkit-overflow-scrolling:touch;}
+.detail-card{background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:14px 16px; max-height:300px; overflow-y:auto; overflow-x:hidden; -webkit-overflow-scrolling:touch; min-width:0;}
+.detail-card *{min-width:0; overflow-wrap:break-word; word-break:break-word;}
 .detail-card::-webkit-scrollbar{width:7px;}
 .detail-card::-webkit-scrollbar-track{background:transparent;}
 .detail-card::-webkit-scrollbar-thumb{background:var(--faint); border-radius:4px;}
