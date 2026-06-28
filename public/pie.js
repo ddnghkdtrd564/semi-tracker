@@ -10,6 +10,21 @@ const newsLoaded = {};
 function loadInvested(){ try{ return JSON.parse(localStorage.getItem(DIV_STORAGE_KEY)) || {}; }catch(e){ return {}; } }
 function saveInvested(obj){ try{ localStorage.setItem(DIV_STORAGE_KEY, JSON.stringify(obj)); }catch(e){} }
 function fmtMoney(v){ return '£' + v.toLocaleString('en-GB', {minimumFractionDigits:2, maximumFractionDigits:2}); }
+function fmtPrice(v, currency){
+  // LSE shares/ETFs are usually quoted in pence (GBp), not pounds — this is the
+  // most common source of "is this number even right?" confusion, so we always
+  // label the unit explicitly rather than just printing a bare number.
+  if (currency === 'GBp') return v.toFixed(2) + 'p';
+  if (currency === 'GBP') return '£' + v.toFixed(2);
+  if (currency === 'USD') return '$' + v.toFixed(2);
+  return v.toFixed(2); // currency unknown this cycle — still show the number, never blank
+}
+const SOURCE_LABEL = { finnhub: 'Finnhub', yahoo: 'Yahoo', stooq: 'Stooq' };
+function sourceBadge(h){
+  if (h.stale) return `<span class="stale-badge" title="All live sources failed this cycle — showing last known good price">stale ${h.staleAgeSec!=null ? h.staleAgeSec+'s' : ''}</span>`;
+  if (!h.priceSource) return '';
+  return `<span class="source-badge" title="Sourced from ${SOURCE_LABEL[h.priceSource]||h.priceSource}">${(SOURCE_LABEL[h.priceSource]||h.priceSource)[0]}</span>`;
+}
 function fmtCompact(v, currency){
   if (v===null||v===undefined) return null;
   const sym = currency==='GBp' ? 'p' : (currency==='USD' ? '$' : (currency||''));
@@ -18,9 +33,28 @@ function fmtCompact(v, currency){
   return sym + v.toFixed(2);
 }
 
+const PIE_REFRESH_MS = 30000; // matches server's PIE_CACHE_MS
+let pieInterval = null, pieLastFetch = null, pieCountdownInterval = null;
+
+function activatePieTab(){
+  loadPie();
+  if (!pieInterval) pieInterval = setInterval(loadPie, PIE_REFRESH_MS);
+  if (!pieCountdownInterval) pieCountdownInterval = setInterval(updatePieFreshness, 1000);
+}
+
+function updatePieFreshness(){
+  const el = document.getElementById('pieLastUpdated');
+  if (!el || !pieLastFetch) return;
+  const secAgo = Math.round((Date.now() - pieLastFetch) / 1000);
+  const nextIn = Math.max(0, Math.round(PIE_REFRESH_MS/1000) - secAgo);
+  el.textContent = `Updated ${secAgo}s ago · next refresh in ${nextIn}s`;
+}
+
 async function loadPie(){
   const panel = document.getElementById('panel-DIV');
   if (!panel.dataset.built){ panel.innerHTML = pieSkeleton(); panel.dataset.built = '1'; bindPieToolbar(); }
+  const btn = document.getElementById('pieRefreshBtn');
+  if (btn) btn.classList.add('spinning');
   try{
     const res = await fetch('/api/pie');
     const data = await res.json();
@@ -31,17 +65,30 @@ async function loadPie(){
     }
     document.getElementById('pieError').style.display='none';
     pieData = data.holdings;
+    pieLastFetch = Date.now();
+    updatePieFreshness();
     renderPieTable();
   }catch(e){
     document.getElementById('pieError').style.display='block';
     document.getElementById('pieError').textContent = '⚠ Could not reach server: ' + e.message;
+  }finally{
+    if (btn) setTimeout(()=>btn.classList.remove('spinning'), 400);
   }
 }
 
 function pieSkeleton(){
   return `
-    <div class="ticker-row"><div class="ticker-id"><span class="sym">UK Dividend Pie 🥧</span></div></div>
-    <div class="fund-desc">All 26 holdings at their target weight. Live price + stats where a free feed covers them; dividend dates, analyst views and EPS context for LSE names are curated research (dated, not live-ticking) — never a blank dash.</div>
+    <div class="ticker-row">
+      <div class="ticker-id"><span class="sym"><span class="live-dot"></span>UK Dividend Pie 🥧</span></div>
+      <button class="refresh-btn" id="pieRefreshBtn" onclick="loadPie()" title="Refresh now">⟳</button>
+    </div>
+    <div class="fund-desc">All 26 holdings at their target weight. Live price where a free feed covers it; dividend dates, analyst views and EPS context for LSE names are curated research (dated, not live-ticking) — never a blank dash.</div>
+    <div class="meta-row"><span id="pieLastUpdated">Loading…</span><span>Auto-refreshes every 30s</span></div>
+
+    <div class="freshness-banner">
+      <strong>On live data speed, honestly:</strong> LSE prices below are <strong>~15 minutes delayed</strong> — that's not a limitation of this site, it's how free market data works everywhere (Yahoo, Google Finance, the LSE's own free widget — all the same delay; genuine real-time LSE data is a paid exchange-licensed feed, full stop). To maximise reliability within that, every LSE price tries <strong>Yahoo → Stooq → Finnhub</strong> in order and falls back automatically. US-listed names (INTC, KLAC) are close to real-time during market hours via Finnhub directly.
+    </div>
+
     <div id="pieError" class="error-banner"></div>
 
     <div class="pie-toolbar">
@@ -111,7 +158,7 @@ function renderPieTable(){
     totalInvested += amt; totalAnnual += annual;
 
     const priceCell = h.price !== null
-      ? `${h.price.toFixed(2)}<span style="color:var(--faint); font-size:10px;"> ${h.priceSource==='yahoo'?'(fallback)':''}</span>`
+      ? `${fmtPrice(h.price, h.stats?.currency)} ${sourceBadge(h)}`
       : `<span class="skel" style="width:50px;"></span>`;
     const moveCell = h.move !== null ? `<span class="move ${moveClass(h.move)}">${fmtPct(h.move,true)}</span>` : `<span class="skel" style="width:36px;"></span>`;
 
