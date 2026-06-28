@@ -108,6 +108,37 @@ async function fetchYahooBatch(symbols) {
   return map;
 }
 
+// Stooq — free, no API key, explicitly covers LSE ("xxxx.uk" tickers). Used as a
+// third-layer fallback for price only (it doesn't reliably give a clean % move
+// in this lightweight CSV format, so we leave move=null when this is the source
+// rather than guess). NOTE: unverified against a live call from this build
+// environment (no outbound network here) — first thing to check if LSE prices
+// ever come back empty after deploy.
+async function fetchStooqBatch(stooqSymbols) {
+  const url = `https://stooq.com/q/l/?s=${encodeURIComponent(stooqSymbols.join(','))}&f=sd2t2ohlcv&h&e=csv`;
+  const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PortfolioTracker/1.0)' } });
+  if (!r.ok) throw new Error(`Stooq HTTP ${r.status}`);
+  const text = await r.text();
+  const lines = text.trim().split('\n');
+  const map = {};
+  lines.slice(1).forEach((line) => {
+    const cols = line.split(',');
+    const sym = (cols[0] || '').toLowerCase();
+    const close = parseFloat(cols[6]);
+    if (sym && !isNaN(close) && close > 0) map[sym] = { close };
+  });
+  return map;
+}
+
+// Turn our internal LSE ticker ("LLOY.L") into Stooq's convention ("lloy.uk")
+function toStooqSymbol(ticker) {
+  return ticker.replace(/\.L$/i, '').toLowerCase() + '.uk';
+}
+
+// Server-side memory of the last successful price per ticker, so a fully-failed
+// refresh cycle never blanks a row — it shows the last good price, marked stale.
+const lastGoodPrice = {};
+
 async function fetchFinnhubMetric(symbol) {
   const url = `https://finnhub.io/api/v1/stock/metric?symbol=${encodeURIComponent(symbol)}&metric=all&token=${API_KEY}`;
   const r = await fetch(url);
@@ -130,35 +161,49 @@ async function fetchFinnhubEarnings(symbol) {
 }
 
 let pieCache = { data: null, ts: 0 };
+const PIE_CACHE_MS = 30 * 1000; // refreshed faster than fund tabs — Yahoo/Stooq batch calls are cheap (1 HTTP call covers all 26 tickers)
 
 async function buildPie() {
-  const tickers = ukDividendPie.map((h) => h.t);
+  const lseTickers = ukDividendPie.filter((h) => h.exch === 'LSE').map((h) => h.t);
+  const usTickers = ukDividendPie.filter((h) => h.exch === 'US').map((h) => h.t);
 
-  // 1. Try Finnhub for every ticker (works for US always, often works for .L too at 15-min delay)
-  const finnhubResults = await Promise.all(
-    tickers.map(async (t) => {
-      try { return { t, q: await fetchFinnhubQuote(t) }; }
-      catch (e) { return { t, q: null }; }
-    })
-  );
-  const finnhubMap = {};
-  finnhubResults.forEach(({ t, q }) => { finnhubMap[t] = q; });
+  // ---- LSE chain: Yahoo (primary) -> Stooq (free, no-key, explicit LSE coverage) -> Finnhub (tertiary) ----
+  let yahooLse = {};
+  try { yahooLse = await fetchYahooBatch(lseTickers); } catch (e) { /* fall through to Stooq/Finnhub */ }
 
-  // 2. Whichever tickers came back empty/zero from Finnhub, batch-fallback to Yahoo
-  const weakTickers = tickers.filter((t) => {
-    const q = finnhubMap[t];
-    return !q || typeof q.c !== 'number' || q.c === 0;
-  });
-  let yahooMap = {};
-  if (weakTickers.length > 0) {
-    try { yahooMap = await fetchYahooBatch(weakTickers); }
-    catch (e) { /* leave yahooMap empty; handled per-row below */ }
+  const stillNeedLse = lseTickers.filter((t) => !(yahooLse[t] && typeof yahooLse[t].regularMarketPrice === 'number'));
+  let stooqMap = {};
+  if (stillNeedLse.length > 0) {
+    try {
+      const stooqSymbols = stillNeedLse.map(toStooqSymbol);
+      stooqMap = await fetchStooqBatch(stooqSymbols);
+    } catch (e) { /* fall through to Finnhub */ }
   }
-  // 3. Also pull Yahoo for ALL tickers to source stats (mkt cap / P/E / 52wk) — broader coverage than Finnhub free tier for LSE
-  let yahooStatsMap = {};
-  try { yahooStatsMap = await fetchYahooBatch(tickers); } catch (e) { /* fall through, stats will show informative message */ }
 
-  // 4. Live analyst target + EPS surprise for the two US-listed names
+  const stillNeedLse2 = stillNeedLse.filter((t) => !stooqMap[toStooqSymbol(t)]);
+  let finnhubLse = {};
+  if (stillNeedLse2.length > 0) {
+    const results = await Promise.all(stillNeedLse2.map(async (t) => {
+      try { return { t, q: await fetchFinnhubQuote(t) }; } catch (e) { return { t, q: null }; }
+    }));
+    results.forEach(({ t, q }) => { finnhubLse[t] = q; });
+  }
+
+  // ---- US chain: Finnhub (primary, well-documented free coverage) -> Yahoo (fallback) ----
+  const finnhubUsResults = await Promise.all(usTickers.map(async (t) => {
+    try { return { t, q: await fetchFinnhubQuote(t) }; } catch (e) { return { t, q: null }; }
+  }));
+  const finnhubUs = {};
+  finnhubUsResults.forEach(({ t, q }) => { finnhubUs[t] = q; });
+  const weakUs = usTickers.filter((t) => !(finnhubUs[t] && typeof finnhubUs[t].c === 'number' && finnhubUs[t].c !== 0));
+  let yahooUs = {};
+  if (weakUs.length > 0) { try { yahooUs = await fetchYahooBatch(weakUs); } catch (e) { /* none left */ } }
+
+  // ---- Stats (market cap / P/E / 52wk / volume): Yahoo for everyone, broadest free coverage ----
+  let yahooStatsMap = {};
+  try { yahooStatsMap = await fetchYahooBatch(ukDividendPie.map((h) => h.t)); } catch (e) { /* informative message shown per-row */ }
+
+  // ---- Live analyst target + EPS surprise for the two US-listed names ----
   const liveExtras = {};
   for (const h of ukDividendPie) {
     if (h.exch === 'US') {
@@ -172,34 +217,49 @@ async function buildPie() {
   }
 
   const holdings = ukDividendPie.map((h) => {
-    const fq = finnhubMap[h.t];
-    const yq = yahooMap[h.t];
-    const ys = yahooStatsMap[h.t];
+    let price = null, move = null, priceSource = null, stale = false;
 
-    let price = null, move = null, priceSource = null;
-    if (fq && typeof fq.c === 'number' && fq.c !== 0) {
-      price = fq.c; move = typeof fq.dp === 'number' ? fq.dp : null; priceSource = 'finnhub';
-    } else if (yq && typeof yq.regularMarketPrice === 'number') {
-      price = yq.regularMarketPrice; move = typeof yq.regularMarketChangePercent === 'number' ? yq.regularMarketChangePercent : null; priceSource = 'yahoo';
+    if (h.exch === 'LSE') {
+      const yq = yahooLse[h.t];
+      const sq = stooqMap[toStooqSymbol(h.t)];
+      const fq = finnhubLse[h.t];
+      if (yq && typeof yq.regularMarketPrice === 'number') {
+        price = yq.regularMarketPrice; move = typeof yq.regularMarketChangePercent === 'number' ? yq.regularMarketChangePercent : null; priceSource = 'yahoo';
+      } else if (sq) {
+        price = sq.close; move = null; priceSource = 'stooq';
+      } else if (fq && typeof fq.c === 'number' && fq.c !== 0) {
+        price = fq.c; move = typeof fq.dp === 'number' ? fq.dp : null; priceSource = 'finnhub';
+      }
+    } else {
+      const fq = finnhubUs[h.t];
+      const yq = yahooUs[h.t];
+      if (fq && typeof fq.c === 'number' && fq.c !== 0) {
+        price = fq.c; move = typeof fq.dp === 'number' ? fq.dp : null; priceSource = 'finnhub';
+      } else if (yq && typeof yq.regularMarketPrice === 'number') {
+        price = yq.regularMarketPrice; move = typeof yq.regularMarketChangePercent === 'number' ? yq.regularMarketChangePercent : null; priceSource = 'yahoo';
+      }
     }
 
+    // Last line of defence: every live source failed this cycle — use last known good price rather than blank.
+    if (price === null && lastGoodPrice[h.t]) {
+      price = lastGoodPrice[h.t].price; move = lastGoodPrice[h.t].move; priceSource = lastGoodPrice[h.t].source;
+      stale = true;
+    } else if (price !== null) {
+      lastGoodPrice[h.t] = { price, move, source: priceSource, ts: Date.now() };
+    }
+
+    const ys = yahooStatsMap[h.t];
     const stats = ys ? {
-      marketCap: ys.marketCap ?? null,
-      peRatio: ys.trailingPE ?? null,
-      fiftyTwoWeekLow: ys.fiftyTwoWeekLow ?? null,
-      fiftyTwoWeekHigh: ys.fiftyTwoWeekHigh ?? null,
-      volume: ys.regularMarketVolume ?? null,
-      currency: ys.currency ?? null,
+      marketCap: ys.marketCap ?? null, peRatio: ys.trailingPE ?? null,
+      fiftyTwoWeekLow: ys.fiftyTwoWeekLow ?? null, fiftyTwoWeekHigh: ys.fiftyTwoWeekHigh ?? null,
+      volume: ys.regularMarketVolume ?? null, currency: ys.currency ?? null,
     } : null;
 
     const extra = liveExtras[h.t];
-
     return {
-      ...h,
-      price, move, priceSource,
-      stats,
-      liveAnalyst: extra?.priceTarget || null,
-      liveEarnings: extra?.earnings || null,
+      ...h, price, move, priceSource, stale,
+      staleAgeSec: stale && lastGoodPrice[h.t] ? Math.round((Date.now() - lastGoodPrice[h.t].ts) / 1000) : null,
+      stats, liveAnalyst: extra?.priceTarget || null, liveEarnings: extra?.earnings || null,
     };
   });
 
@@ -209,7 +269,7 @@ async function buildPie() {
 app.get('/api/pie', async (req, res) => {
   try {
     if (!API_KEY) return res.status(500).json({ error: 'FINNHUB_API_KEY is not set. Add it under Render > Environment.' });
-    if (pieCache.data && Date.now() - pieCache.ts < CACHE_MS) return res.json(pieCache.data);
+    if (pieCache.data && Date.now() - pieCache.ts < PIE_CACHE_MS) return res.json(pieCache.data);
     const data = await buildPie();
     pieCache = { data, ts: Date.now() };
     res.json(data);
