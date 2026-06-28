@@ -9,52 +9,90 @@
 </head>
 <body>
 
-<div class="topnav">
-  <div class="topnav-inner">
-    <div class="tab-group">
-      <button class="tab-btn active" data-tab="SEMI">SEMI</button>
-      <button class="tab-btn" data-tab="IUSA">IUSA</button>
-      <button class="tab-btn" data-tab="DIV">UK Dividend Pie 🥧</button>
-    </div>
-    <button class="theme-toggle" id="themeToggle" title="Toggle light/dark">🌙</button>
+<div class="topbar">
+  <div class="topbar-left">
+    <button class="hamburger" id="hamburgerBtn" aria-label="Open menu"><span></span><span></span><span></span></button>
+    <span class="wordmark"><b>PORTFOLIO</b> TRACKER</span>
   </div>
+  <button class="theme-toggle" id="themeToggle" title="Toggle light/dark">●</button>
 </div>
 
+<div class="drawer-overlay" id="drawerOverlay"></div>
+<nav class="drawer" id="drawer">
+  <div class="drawer-head">
+    <span class="label">Navigate</span>
+    <button class="drawer-close" id="drawerClose" aria-label="Close menu">×</button>
+  </div>
+  <div class="drawer-nav">
+    <button class="drawer-item" data-tab="LANDING">
+      <div><div class="name">Home</div><div class="sub">Market overview</div></div>
+    </button>
+    <button class="drawer-item" data-tab="SEMI">
+      <div><div class="name">SEMI</div><div class="sub">Semiconductor ETF</div></div>
+    </button>
+    <button class="drawer-item" data-tab="IUSA">
+      <div><div class="name">IUSA</div><div class="sub">S&amp;P 500 ETF</div></div>
+    </button>
+    <button class="drawer-item" data-tab="DIV">
+      <div><div class="name">UK Dividend Pie 🥧</div><div class="sub">26 holdings · DRIP calculator</div></div>
+    </button>
+  </div>
+  <div class="drawer-foot">Not financial advice.</div>
+</nav>
+
 <div class="wrap">
-  <div class="panel active" id="panel-SEMI" data-fund="SEMI"></div>
+  <div class="panel active" id="panel-LANDING"></div>
+  <div class="panel" id="panel-SEMI" data-fund="SEMI"></div>
   <div class="panel" id="panel-IUSA" data-fund="IUSA"></div>
   <div class="panel" id="panel-DIV"></div>
 </div>
 
 <script src="/app.js"></script>
 <script src="/pie.js"></script>
+<script src="/landing.js"></script>
 <script>
-  document.querySelectorAll('.tab-btn').forEach(btn=>{
-    btn.addEventListener('click', ()=>{
-      document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
-      document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
-      btn.classList.add('active');
-      const tab = btn.dataset.tab;
-      document.getElementById('panel-' + tab).classList.add('active');
-      if (tab === 'DIV') activatePieTab();
-      else activateFundTab(tab);
-    });
+  // ---- navigation ----
+  function navigateTo(tab){
+    document.querySelectorAll('.drawer-item').forEach(b=>b.classList.toggle('active', b.dataset.tab===tab));
+    document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+    document.getElementById('panel-' + tab).classList.add('active');
+    closeDrawer();
+    if (tab === 'LANDING') activateLandingTab();
+    else if (tab === 'DIV') activatePieTab();
+    else activateFundTab(tab);
+    window.scrollTo(0,0);
+  }
+
+  document.querySelectorAll('.drawer-item').forEach(btn=>{
+    btn.addEventListener('click', ()=> navigateTo(btn.dataset.tab));
   });
 
+  // ---- drawer open/close ----
+  const drawer = document.getElementById('drawer');
+  const overlay = document.getElementById('drawerOverlay');
+  function openDrawer(){ drawer.classList.add('open'); overlay.classList.add('open'); }
+  function closeDrawer(){ drawer.classList.remove('open'); overlay.classList.remove('open'); }
+  document.getElementById('hamburgerBtn').addEventListener('click', openDrawer);
+  document.getElementById('drawerClose').addEventListener('click', closeDrawer);
+  overlay.addEventListener('click', closeDrawer);
+
+  // ---- theme ----
   const themeToggle = document.getElementById('themeToggle');
   function applyTheme(t){
     document.body.setAttribute('data-theme', t);
-    themeToggle.textContent = t === 'light' ? '☀️' : '🌙';
+    themeToggle.textContent = t === 'dark' ? '○' : '●';
     try{ localStorage.setItem('theme', t); }catch(e){}
   }
-  let savedTheme = 'dark';
-  try{ savedTheme = localStorage.getItem('theme') || 'dark'; }catch(e){}
+  let savedTheme = 'light';
+  try{ savedTheme = localStorage.getItem('theme') || 'light'; }catch(e){}
   applyTheme(savedTheme);
   themeToggle.addEventListener('click', ()=>{
-    applyTheme(document.body.getAttribute('data-theme') === 'light' ? 'dark' : 'light');
+    applyTheme(document.body.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
   });
 
-  initFundTabs();
+  // ---- boot: landing page is the default first view ----
+  document.querySelector('.drawer-item[data-tab="LANDING"]').classList.add('active');
+  activateLandingTab();
 </script>
 </body>
 </html>
