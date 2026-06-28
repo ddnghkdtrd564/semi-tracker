@@ -312,11 +312,11 @@ function renderDetailCharts(h){
       if (h.exch === 'US' && h.liveAnalyst && h.liveAnalyst.targetMean){
         labels = ['Current', 'Target Low', 'Target Mean', 'Target High'];
         values = [h.price, h.liveAnalyst.targetLow, h.liveAnalyst.targetMean, h.liveAnalyst.targetHigh];
-        colors = ['#E0A93D', '#7C8699', '#3ED98E', '#3ED98E'];
+        colors = ['#D32B1F', '#9B9B9B', '#1C7C4D', '#1C7C4D'];
       } else if (h.analyst && h.analyst.lowPct !== null && h.price) {
         labels = ['Current', 'Implied Low', 'Implied High'];
         values = [h.price, h.price*(1+h.analyst.lowPct/100), h.price*(1+h.analyst.highPct/100)];
-        colors = ['#E0A93D', '#7C8699', '#3ED98E'];
+        colors = ['#D32B1F', '#9B9B9B', '#1C7C4D'];
       }
       if (values && values.every(v=>typeof v==='number')){
         chartInstances[h.t] = chartInstances[h.t] || {};
@@ -336,8 +336,8 @@ function renderDetailCharts(h){
       chartInstances[h.t].eps = new Chart(canvas, {
         type:'bar',
         data:{ labels: sorted.map(e=>e.period), datasets:[
-          { label:'Estimate', data: sorted.map(e=>e.estimate), backgroundColor:'#3A4254' },
-          { label:'Actual', data: sorted.map(e=>e.actual), backgroundColor:'#3ED98E' },
+          { label:'Estimate', data: sorted.map(e=>e.estimate), backgroundColor:'#9B9B9B' },
+          { label:'Actual', data: sorted.map(e=>e.actual), backgroundColor:'#1C7C4D' },
         ]},
         options: baseOpts,
       });
@@ -428,8 +428,8 @@ function updateDrip(){
   chartInstances._drip = new Chart(document.getElementById('dripChart'), {
     type:'line',
     data:{ labels, datasets:[
-      { label:'With DRIP', data:dripSeries, borderColor:'#3ED98E', backgroundColor:'rgba(62,217,142,0.08)', fill:true, tension:0.25 },
-      { label:'Without DRIP', data:noDripSeries, borderColor:'#7C8699', backgroundColor:'rgba(124,134,153,0.05)', fill:true, tension:0.25 },
+      { label:'With DRIP', data:dripSeries, borderColor:'#1C7C4D', backgroundColor:'rgba(28,124,77,0.08)', fill:true, tension:0.25 },
+      { label:'Without DRIP', data:noDripSeries, borderColor:'#9B9B9B', backgroundColor:'rgba(155,155,155,0.06)', fill:true, tension:0.25 },
     ]},
     options:{ responsive:true, maintainAspectRatio:false,
       plugins:{ legend:{ labels:{ color:textColor } } },
