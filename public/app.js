@@ -20,7 +20,7 @@ function fundPanelSkeleton(key){
       <div class="coverage-legend">
         <span><span class="legend-dot" style="background:var(--up)"></span>Tracked, up</span>
         <span><span class="legend-dot" style="background:var(--down)"></span>Tracked, down</span>
-        <span><span class="legend-dot" style="background:#3A4254"></span>Tracked, flat</span>
+        <span><span class="legend-dot" style="background:#9B9B9B"></span>Tracked, flat</span>
         <span><span class="legend-dot" style="background:#232A37"></span>Untracked</span>
       </div>
     </div>
@@ -105,7 +105,7 @@ function renderFund(key){
     const seg = document.createElement('div');
     seg.className = 'seg' + (h.move===null ? ' untracked' : '');
     seg.style.width = h.w + '%';
-    if(h.move!==null){ seg.style.background = h.move>0.05 ? 'var(--up)' : (h.move<-0.05 ? 'var(--down)' : '#3A4254'); }
+    if(h.move!==null){ seg.style.background = h.move>0.05 ? 'var(--up)' : (h.move<-0.05 ? 'var(--down)' : '#9B9B9B'); }
     seg.title = h.t + ' · ' + h.w.toFixed(2) + '% · ' + (h.move===null?'no live data':fmtPct(h.move,true));
     stackBar.appendChild(seg);
   });
