@@ -361,5 +361,35 @@ app.get('/api/news/:ticker', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ============================================================
+// LANDING PAGE — "most popular markets" board
+// ============================================================
+const popularMarkets = [
+  { t: '^GSPC', label: 'S&P 500', n: 'US large-cap benchmark' },
+  { t: '^IXIC', label: 'Nasdaq', n: 'US tech-heavy index' },
+  { t: '^DJI', label: 'Dow Jones', n: '30 major US companies' },
+  { t: '^FTSE', label: 'FTSE 100', n: 'UK large-cap benchmark' },
+  { t: '^N225', label: 'Nikkei 225', n: 'Japan benchmark' },
+  { t: '^GDAXI', label: 'DAX', n: 'Germany benchmark' },
+];
+let indicesCache = { data: null, ts: 0 };
+const INDICES_CACHE_MS = 45 * 1000;
+
+app.get('/api/indices', async (req, res) => {
+  if (indicesCache.data && Date.now() - indicesCache.ts < INDICES_CACHE_MS) return res.json(indicesCache.data);
+  const diag = [];
+  const map = await fetchYahooChartBatch(popularMarkets.map((m) => m.t), diag);
+  const markets = popularMarkets.map((m) => ({
+    ...m,
+    price: map[m.t]?.price ?? null,
+    move: map[m.t]?.move ?? null,
+    currency: map[m.t]?.currency ?? null,
+  }));
+  const data = { markets, fetchedAt: new Date().toISOString() };
+  indicesCache = { data, ts: Date.now() };
+  if (diag.length) console.log('[indices] diagnostics:', JSON.stringify(diag));
+  res.json(data);
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 app.listen(PORT, () => console.log(`Tracker listening on port ${PORT}`));
